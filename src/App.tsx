@@ -121,6 +121,12 @@ export default function App() {
         `/api/weather?lat=${city.latitude}&lon=${city.longitude}&name=${nameEnc}&country=${countryEnc}`
       );
       if (!res.ok) throw new Error("Failed to load real-time forecast data");
+      
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.includes("text/html")) {
+        throw new Error("Backend server missing. Ensure you deploy this as a full-stack Node.js app, not a static site.");
+      }
+      
       const data: WeatherPayload = await res.json();
       setWeatherData(data);
 
@@ -142,6 +148,10 @@ export default function App() {
     fetch(`/api/trends?lat=${wPayload.city.latitude}&lon=${wPayload.city.longitude}&name=${nameEnc}`)
       .then(async (res) => {
         if (!res.ok) throw new Error("Historical data baseline unavailable");
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.includes("text/html")) {
+          throw new Error("Backend server missing. Ensure you deploy this as a full-stack Node.js app.");
+        }
         const data = await res.json();
         setTrendsData(data);
       })
@@ -163,6 +173,10 @@ export default function App() {
     })
       .then(async (res) => {
         if (!res.ok) throw new Error("Weather intelligence engine offline");
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.includes("text/html")) {
+          throw new Error("Backend server missing.");
+        }
         const data = await res.json();
         setRecommendations(data);
       })

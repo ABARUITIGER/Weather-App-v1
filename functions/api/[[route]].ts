@@ -1,39 +1,14 @@
-import express from "express";
-import path from "path";
-import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type } from "@google/genai";
-import dotenv from "dotenv";
+import { Hono } from 'hono'
+import { handle } from 'hono/cloudflare-pages'
+import { GoogleGenAI, Type } from '@google/genai'
+import { fallbackCities, getDeterministicCity, generateDeterministicWeather, generateDeterministicTrends } from '../../src/utils/simulations.js'
 
-dotenv.config();
+type Bindings = {
+  GEMINI_API_KEY: string;
+};
 
-const app = express();
-const PORT = 3000;
+const app = new Hono<{ Bindings: Bindings }>().basePath('/api')
 
-app.use(express.json());
-
-// Lazy-initialized Gemini API client
-let aiInstance: GoogleGenAI | null = null;
-function getGeminiClient(): GoogleGenAI {
-  if (!aiInstance) {
-    const key = process.env.GEMINI_API_KEY;
-    if (!key) {
-      throw new Error("GEMINI_API_KEY is not defined in environment variables. Please set it in AI Studio Secrets.");
-    }
-    aiInstance = new GoogleGenAI({
-      apiKey: key,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
-      },
-    });
-  }
-  return aiInstance;
-}
-
-import { fallbackCities, getDeterministicCity, generateDeterministicWeather, generateDeterministicTrends } from "./src/utils/simulations.js";
-
-// 1. Geocoding API proxy (Open-Meteo Geocoding)
 async function fetchWithTimeout(url: string, options: any = {}, timeout: number = 10000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
@@ -50,10 +25,10 @@ async function fetchWithTimeout(url: string, options: any = {}, timeout: number 
   }
 }
 
-app.get("/api/geocode", async (req, res) => {
-  const query = req.query.q;
-  if (!query || typeof query !== "string") {
-    return res.status(400).json({ error: "Query parameter 'q' is required" });
+app.get('/geocode', async (c) => {
+  const query = c.req.query('q');
+  if (!query) {
+    return c.json({ error: "Query parameter 'q' is required" }, 400);
   }
 
   try {
@@ -62,45 +37,49 @@ app.get("/api/geocode", async (req, res) => {
     if (!response.ok) {
       throw new Error(`Open-Meteo geocoding service returned status: ${response.status}`);
     }
+    const data = (await response.json()) as any;
+    const results = data.results || [];
+    
+    // Sort logic
+    results.sort((a: any, b: any) => {
+      const aIsUS = a.country_code === "US";
+      const bIsUS = b.country_code === "US";
+      if (aIsUS && !bIsUS) return -1;
+      if (!aIsUS && bIsUS) return 1;
+      return (b.population || 0) - (a.population || 0);
+    });
 
-    const data = await response.json();
-    const results = (data.results || []).map((item: any) => ({
-      name: item.name,
-      latitude: item.latitude,
-      longitude: item.longitude,
-      country: item.country || "",
-      admin1: item.admin1 || "",
-      country_code: item.country_code || "",
-    }));
-
-    res.json(results);
+    return c.json(results);
   } catch (error: any) {
     console.warn("Geocoding proxy fetch failed or timed out. Initiating simulated fallback.", error);
     const lowerQuery = query.toLowerCase().trim();
-    const matches = fallbackCities.filter(c => 
-      c.name.toLowerCase().includes(lowerQuery) || 
-      c.country.toLowerCase().includes(lowerQuery)
+    const matches = fallbackCities.filter(city => 
+      city.name.toLowerCase().includes(lowerQuery) || 
+      city.country.toLowerCase().includes(lowerQuery)
     );
     
     if (matches.length > 0) {
-      res.json(matches);
+      return c.json(matches);
     } else {
-      res.json([getDeterministicCity(query)]);
+      return c.json([getDeterministicCity(query)]);
     }
   }
 });
 
-// 2. Weather Forecast API proxy & transformation
-app.get("/api/weather", async (req, res) => {
-  const { lat, lon, name, country } = req.query;
+app.get('/weather', async (c) => {
+  const lat = c.req.query('lat');
+  const lon = c.req.query('lon');
+  const name = c.req.query('name');
+  const country = c.req.query('country');
+
   if (!lat || !lon) {
-    return res.status(400).json({ error: "Latitude (lat) and Longitude (lon) are required" });
+    return c.json({ error: "Latitude (lat) and Longitude (lon) are required" }, 400);
   }
 
-  const latitude = parseFloat(lat as string);
-  const longitude = parseFloat(lon as string);
-  const cityName = (name as string) || "Unknown Location";
-  const countryName = (country as string) || "";
+  const latitude = parseFloat(lat);
+  const longitude = parseFloat(lon);
+  const cityName = name || "Unknown Location";
+  const countryName = country || "";
 
   try {
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,wind_speed_10m,wind_direction_10m,weather_code,cloud_cover,pressure_msl&hourly=temperature_2m,relative_humidity_2m,precipitation_probability,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,uv_index_max,precipitation_sum,precipitation_probability_max,wind_speed_10m_max&timezone=auto`;
@@ -110,7 +89,7 @@ app.get("/api/weather", async (req, res) => {
       throw new Error(`Open-Meteo weather service returned status: ${response.status}`);
     }
 
-    const data = await response.json();
+    const data = (await response.json()) as any;
 
     const payload = {
       city: {
@@ -132,75 +111,65 @@ app.get("/api/weather", async (req, res) => {
         cloudCover: data.current.cloud_cover,
         pressure: data.current.pressure_msl,
       },
-      hourly: data.hourly.time.slice(0, 24).map((timeStr: string, idx: number) => ({
+      hourly: data.hourly.time.map((timeStr: string, index: number) => ({
         time: timeStr,
-        temperature: data.hourly.temperature_2m[idx],
-        humidity: data.hourly.relative_humidity_2m[idx],
-        precipitationProbability: data.hourly.precipitation_probability[idx],
-        weatherCode: data.hourly.weather_code[idx],
-        windSpeed: data.hourly.wind_speed_10m[idx],
-      })),
-      daily: data.daily.time.map((dateStr: string, idx: number) => ({
-        date: dateStr,
-        weatherCode: data.daily.weather_code[idx],
-        tempMax: data.daily.temperature_2m_max[idx],
-        tempMin: data.daily.temperature_2m_min[idx],
-        apparentMax: data.daily.apparent_temperature_max[idx],
-        apparentMin: data.daily.apparent_temperature_min[idx],
-        uvIndexMax: data.daily.uv_index_max[idx],
-        precipitationSum: data.daily.precipitation_sum[idx],
-        precipitationProbability: data.daily.precipitation_probability_max[idx],
-        windSpeedMax: data.daily.wind_speed_10m_max[idx],
+        temperature: data.hourly.temperature_2m[index],
+        humidity: data.hourly.relative_humidity_2m[index],
+        precipitationProbability: data.hourly.precipitation_probability[index],
+        weatherCode: data.hourly.weather_code[index],
+        windSpeed: data.hourly.wind_speed_10m[index],
+      })).slice(0, 24),
+      daily: data.daily.time.map((timeStr: string, index: number) => ({
+        date: timeStr,
+        weatherCode: data.daily.weather_code[index],
+        tempMax: data.daily.temperature_2m_max[index],
+        tempMin: data.daily.temperature_2m_min[index],
+        apparentMax: data.daily.apparent_temperature_max[index],
+        apparentMin: data.daily.apparent_temperature_min[index],
+        uvIndexMax: data.daily.uv_index_max[index],
+        precipitationSum: data.daily.precipitation_sum[index],
+        precipitationProbability: data.daily.precipitation_probability_max[index],
+        windSpeedMax: data.daily.wind_speed_10m_max[index],
       })),
     };
 
-    res.json(payload);
+    return c.json(payload);
   } catch (error: any) {
     console.warn("Weather forecast fetch failed or timed out. Initiating simulated fallback.", error);
     const fallbackPayload = generateDeterministicWeather(latitude, longitude, cityName, countryName);
-    res.json(fallbackPayload);
+    return c.json(fallbackPayload);
   }
 });
 
-// Helper for relative months
-function getPreviousMonthDates(date: Date, yearsOffset: number = 0) {
-  const year = date.getFullYear() - yearsOffset;
-  const month = date.getMonth(); // Current month index (0-11)
+function getPreviousMonthDates(anchorDate: Date, subtractYears: number) {
+  const d = new Date(anchorDate);
+  d.setFullYear(d.getFullYear() - subtractYears);
+  d.setMonth(d.getMonth() - 1); // Previous month
   
-  let prevMonth = month - 1;
-  let prevYear = year;
-  if (prevMonth < 0) {
-    prevMonth = 11;
-    prevYear -= 1;
-  }
-  
-  // Start date
-  const start = new Date(Date.UTC(prevYear, prevMonth, 1));
-  // End date (day 0 of next month is the last day of this month)
-  const end = new Date(Date.UTC(prevYear, prevMonth + 1, 0));
-  
-  const formatDate = (d: Date) => d.toISOString().split("T")[0];
-  
+  const start = new Date(Date.UTC(d.getFullYear(), d.getMonth(), 1));
+  const end = new Date(Date.UTC(d.getFullYear(), d.getMonth() + 1, 0)); // Last day of that month
+
   return {
-    start: formatDate(start),
-    end: formatDate(end),
-    monthName: start.toLocaleString("en-US", { month: "long", timeZone: "UTC" }),
-    year: prevYear,
+    start: start.toISOString().split("T")[0],
+    end: end.toISOString().split("T")[0],
+    monthName: start.toLocaleString("default", { month: "long" }),
+    year: start.getFullYear(),
   };
 }
 
-// 3. Historical trends API (Open-Meteo Archive comparison)
-app.get("/api/trends", async (req, res) => {
-  const { lat, lon, name } = req.query;
+app.get('/trends', async (c) => {
+  const lat = c.req.query('lat');
+  const lon = c.req.query('lon');
+  const name = c.req.query('name');
+
   if (!lat || !lon) {
-    return res.status(400).json({ error: "Latitude (lat) and Longitude (lon) are required" });
+    return c.json({ error: "Latitude (lat) and Longitude (lon) are required" }, 400);
   }
 
-  const latitude = parseFloat(lat as string);
-  const longitude = parseFloat(lon as string);
-  const cityName = (name as string) || "This Location";
+  const latitude = parseFloat(lat);
+  const longitude = parseFloat(lon);
+  const cityName = name || "This Location";
 
-  // Baseline date July 2, 2026.
   const anchorDate = new Date("2026-07-02");
   const thisYearDates = getPreviousMonthDates(anchorDate, 0);       // June 2026
   const historicalDates = getPreviousMonthDates(anchorDate, 10);    // June 2016
@@ -215,11 +184,11 @@ app.get("/api/trends", async (req, res) => {
     ]);
 
     if (!thisYearRes.ok || !historicalRes.ok) {
-      throw new Error("One of the historical archive fetches failed");
+      throw new Error(`Archive API returned error statuses: ${thisYearRes.status}, ${historicalRes.status}`);
     }
 
-    const thisYearData = await thisYearRes.json();
-    const historicalData = await historicalRes.json();
+    const thisYearData = (await thisYearRes.json()) as any;
+    const historicalData = (await historicalRes.json()) as any;
 
     const thisYearDaily = thisYearData.daily || { time: [], temperature_2m_max: [], precipitation_sum: [] };
     const historicalDaily = historicalData.daily || { time: [], temperature_2m_max: [], precipitation_sum: [] };
@@ -229,38 +198,36 @@ app.get("/api/trends", async (req, res) => {
 
     let sumTempThisYear = 0;
     let sumTempHist = 0;
-    let totalPrecipThisYear = 0;
-    let totalPrecipHist = 0;
-
     let validTempDaysThisYear = 0;
     let validTempDaysHist = 0;
 
-    for (let i = 0; i < totalDays; i++) {
-      const tempTY = thisYearDaily.temperature_2m_max[i];
-      const tempHist = historicalDaily.temperature_2m_max[i];
-      const precipTY = thisYearDaily.precipitation_sum[i] || 0;
-      const precipHist = historicalDaily.precipitation_sum[i] || 0;
+    let totalPrecipThisYear = 0;
+    let totalPrecipHist = 0;
 
-      if (tempTY !== null && tempTY !== undefined) {
-        sumTempThisYear += tempTY;
+    for (let i = 0; i < totalDays; i++) {
+      const tTY = thisYearDaily.temperature_2m_max[i];
+      const tH = historicalDaily.temperature_2m_max[i];
+      const pTY = thisYearDaily.precipitation_sum[i] || 0;
+      const pH = historicalDaily.precipitation_sum[i] || 0;
+
+      if (tTY !== null && tH !== null) {
+        sumTempThisYear += tTY;
+        sumTempHist += tH;
         validTempDaysThisYear++;
-      }
-      if (tempHist !== null && tempHist !== undefined) {
-        sumTempHist += tempHist;
         validTempDaysHist++;
       }
-
-      totalPrecipThisYear += precipTY;
-      totalPrecipHist += precipHist;
+      
+      totalPrecipThisYear += pTY;
+      totalPrecipHist += pH;
 
       trends.push({
         day: i + 1,
         dateThisYear: thisYearDaily.time[i],
         dateHistorical: historicalDaily.time[i],
-        tempMaxThisYear: tempTY ?? 0,
-        tempMaxHistorical: tempHist ?? 0,
-        precipThisYear: precipTY,
-        precipHistorical: precipHist,
+        tempMaxThisYear: tTY,
+        tempMaxHistorical: tH,
+        precipThisYear: pTY,
+        precipHistorical: pH,
       });
     }
 
@@ -282,27 +249,27 @@ app.get("/api/trends", async (req, res) => {
       },
     };
 
-    res.json(payload);
+    return c.json(payload);
   } catch (error: any) {
     console.warn("Historical trends fetch failed or timed out. Initiating simulated fallback.", error);
     const fallbackTrends = generateDeterministicTrends(latitude, longitude, cityName);
-    res.json(fallbackTrends);
+    return c.json(fallbackTrends);
   }
 });
 
-// 4. Gemini Recommendation API
-app.post("/api/recommendations", async (req, res) => {
+app.post('/recommendations', async (c) => {
   try {
-    const { weatherData } = req.body;
+    const { weatherData } = await c.req.json();
+
     if (!weatherData || !weatherData.city || !weatherData.current || !weatherData.daily) {
-      return res.status(400).json({ error: "Invalid weather data payload in request body" });
+      return c.json({ error: "Invalid weather data payload in request body" }, 400);
     }
 
     const { city, current, daily } = weatherData;
 
-    if (!process.env.GEMINI_API_KEY) {
+    if (!c.env.GEMINI_API_KEY) {
       console.warn("GEMINI_API_KEY is missing. Using pre-compiled weather recommendations fallback.");
-      return res.json({
+      return c.json({
         activities: [
           { name: "Running", rating: "Good", reason: "Standard conditions are stable for outdoor cardio." },
           { name: "Cycling", rating: "Good", reason: "Wind and temperature profiles allow for safe route planning." },
@@ -338,7 +305,14 @@ app.post("/api/recommendations", async (req, res) => {
       Generate planning recommendations for outdoor activities in the exact JSON format specified in the response schema.
     `;
 
-    const ai = getGeminiClient();
+    const ai = new GoogleGenAI({
+      apiKey: c.env.GEMINI_API_KEY as string,
+      httpOptions: {
+        headers: {
+          "User-Agent": "cloudflare-pages",
+        },
+      },
+    });
 
     const response = await ai.models.generateContent({
       model: "gemini-3.5-flash",
@@ -378,11 +352,10 @@ app.post("/api/recommendations", async (req, res) => {
     const resultText = response.text?.trim() || "{}";
     const resultObj = JSON.parse(resultText);
 
-    res.json(resultObj);
+    return c.json(resultObj);
   } catch (error: any) {
     console.error("Gemini API error:", error);
-    // Return a structured backup response so the UI continues working even if the Gemini key is missing or rate limited
-    res.status(200).json({
+    return c.json({
       activities: [
         { name: "Running", rating: "Good", reason: "Standard conditions are stable for outdoor cardio." },
         { name: "Cycling", rating: "Good", reason: "Wind and temperature profiles allow for safe route planning." },
@@ -402,27 +375,4 @@ app.post("/api/recommendations", async (req, res) => {
   }
 });
 
-// Vite middleware for dev or static server for production
-async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-    console.log("Vite development middleware integrated.");
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-    console.log("Serving static production assets from dist/ folder.");
-  }
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
-  });
-}
-
-startServer();
+export const onRequest = handle(app)

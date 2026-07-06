@@ -48,6 +48,10 @@ export default function SearchHeader({
     try {
       const res = await fetch(`/api/geocode?q=${encodeURIComponent(searchTerm)}`);
       if (!res.ok) throw new Error("Failed to load search results");
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.includes("text/html")) {
+        throw new Error("Backend server missing. Ensure you deploy this as a full-stack app.");
+      }
       const data = await res.json();
       setSuggestions(data);
       setShowDropdown(true);
