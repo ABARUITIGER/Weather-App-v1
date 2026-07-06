@@ -32,7 +32,7 @@ function getGeminiClient(): GoogleGenAI {
 }
 
 // 1. Geocoding API proxy (Open-Meteo Geocoding)
-async function fetchWithTimeout(url: string, options: any = {}, timeout: number = 2500) {
+async function fetchWithTimeout(url: string, options: any = {}, timeout: number = 10000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
   try {
@@ -469,8 +469,8 @@ app.get("/api/trends", async (req, res) => {
     const historicalUrl = `https://archive-api.open-meteo.com/v1/archive?latitude=${latitude}&longitude=${longitude}&start_date=${historicalDates.start}&end_date=${historicalDates.end}&daily=temperature_2m_max,precipitation_sum&timezone=auto`;
 
     const [thisYearRes, historicalRes] = await Promise.all([
-      fetchWithTimeout(thisYearUrl),
-      fetchWithTimeout(historicalUrl),
+      fetchWithTimeout(thisYearUrl, {}, 15000),
+      fetchWithTimeout(historicalUrl, {}, 15000),
     ]);
 
     if (!thisYearRes.ok || !historicalRes.ok) {
@@ -558,6 +558,27 @@ app.post("/api/recommendations", async (req, res) => {
     }
 
     const { city, current, daily } = weatherData;
+
+    if (!process.env.GEMINI_API_KEY) {
+      console.warn("GEMINI_API_KEY is missing. Using pre-compiled weather recommendations fallback.");
+      return res.json({
+        activities: [
+          { name: "Running", rating: "Good", reason: "Standard conditions are stable for outdoor cardio." },
+          { name: "Cycling", rating: "Good", reason: "Wind and temperature profiles allow for safe route planning." },
+          { name: "Hiking", rating: "Caution", reason: "Check regional forecast before heading onto unpaved trails." },
+          { name: "Gardening", rating: "Good", reason: "Soil and humidity ranges are favorable for watering or planting." },
+          { name: "Patio Dining", rating: "Excellent", reason: "Clear thermal envelope provides a beautiful dining environment." },
+          { name: "Landscape Photography", rating: "Caution", reason: "Variable cloud layers might restrict golden hour contrast." }
+        ],
+        generalAdvice: "Atmospheric indicators point to standard planning conditions. Review daily UV forecasts for prolonged exposure.",
+        clothingSuggestion: "Lightweight, breathable materials are recommended. Carry a light water-resistant layer if localized showers develop.",
+        safetyChecklist: [
+          "Monitor local temperature index during peak daylight hours.",
+          "Ensure proper hydration schedules during outdoor tasks.",
+          "Apply standard broad-spectrum sunscreen as uv index increases."
+        ]
+      });
+    }
 
     const prompt = `
       Analyze the following weather data for ${city.name}, ${city.country}:
