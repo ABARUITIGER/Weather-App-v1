@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { handle } from 'hono/cloudflare-pages'
 import { GoogleGenAI, Type } from '@google/genai'
-import { fallbackCities, getDeterministicCity, generateDeterministicWeather, generateDeterministicTrends } from '../../src/utils/simulations.js'
+import { fallbackCities, getDeterministicCity, generateDeterministicWeather, generateDeterministicTrends } from '../../src/utils/simulations'
 
 type Bindings = {
   GEMINI_API_KEY: string;
