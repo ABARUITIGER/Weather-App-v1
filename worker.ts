@@ -1,7 +1,6 @@
 import { Hono } from 'hono'
-import { handle } from 'hono/cloudflare-pages'
 import { GoogleGenAI, Type } from '@google/genai'
-import { fallbackCities, getDeterministicCity, generateDeterministicWeather, generateDeterministicTrends } from '../../src/utils/simulations'
+import { fallbackCities, getDeterministicCity, generateDeterministicWeather, generateDeterministicTrends } from './src/utils/simulations.js'
 
 type Bindings = {
   GEMINI_API_KEY: string;
@@ -375,4 +374,4 @@ app.post('/recommendations', async (c) => {
   }
 });
 
-export const onRequest = handle(app)
+export default app;
