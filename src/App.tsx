@@ -7,6 +7,7 @@ import ForecastSection from "./components/ForecastSection";
 import ClimateTrends from "./components/ClimateTrends";
 import PlanningRecommendations from "./components/PlanningRecommendations";
 import AlertSettings from "./components/AlertSettings";
+import DeploymentNotes from "./components/DeploymentNotes";
 
 // Default threshold settings
 const DEFAULT_THRESHOLDS: AlertThresholds = {
@@ -288,6 +289,7 @@ export default function App() {
           </p>
         </div>
       </footer>
+      <DeploymentNotes />
     </div>
   );
 }
